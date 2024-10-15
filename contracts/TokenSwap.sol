@@ -3,28 +3,28 @@ pragma solidity ^0.8.27;
 
 import {IERC20} from "./ITokenSwap.sol";
 
-contract SaveCelo {
-    address celotoken;
+contract TokenSwap {
+    IERC20 public usdcToken;
+    IERC20 public nairaToken;
     address owner;
     address newOwner;
+    uint256 public constant RATE = 1565;
 
     uint256 internal contractBalance;
 
     bool internal locked;
 
-    struct UserAccount {
-        uint256 amount;
-        uint256 duration;
+    event Swap(
+        address indexed user,
+        uint256 usdcAmount,
+        uint256 nairaAmount,
+        bool usdcToNaira
+    );
+
+    constructor(address _usdcToken, address _nairaToken) {
+        usdcToken = IERC20(_usdcToken);
+        nairaToken = IERC20(_nairaToken);
     }
-
-    mapping(address => UserAccount[]) users;
-
-    constructor(address _tokenAddress) {
-        celotoken = _tokenAddress;
-        owner = msg.sender;
-    }
-
-    // modifers
 
     modifier reentrancyGuard() {
         require(!locked, "Not allowed to re-enter");
@@ -38,66 +38,43 @@ contract SaveCelo {
         _;
     }
 
-    // events
-    event DepositSuccessful(address indexed user, uint256 amount, uint256 time);
-    event WithdrawalSuccessful(
-        address indexed user,
-        uint256 amount,
-        uint256 time
-    );
-
-    function depositCelo(
-        uint256 _amount,
-        uint256 _duration
-    ) external reentrancyGuard {
+    function swapUSDCToNaira(uint256 usdcAmount) external reentrancyGuard {
         require(msg.sender != address(0), "Zero address not allowed");
-        uint256 userBal = IERC20(celotoken).balanceOf(msg.sender);
+        require(usdcAmount > 0, "Amount must be greater than 0");
+        uint256 nairaAmount = usdcAmount * RATE;
 
-        require(userBal >= _amount, "Your balance is enough");
-
-        uint256 allowedAmount = IERC20(celotoken).allowance(
-            msg.sender,
-            address(this)
+        require(
+            usdcToken.transferFrom(msg.sender, address(this), usdcAmount),
+            "USDC transfer failed"
+        );
+        require(
+            nairaToken.transfer(msg.sender, nairaAmount),
+            "Naira transfer failed"
         );
 
-        require(allowedAmount >= _amount, "Amount allowed is not enough");
-
-        bool sent = IERC20(celotoken).transferFrom(
-            msg.sender,
-            address(this),
-            _amount
-        );
-
-        require(sent, "Transfer not excuted");
-
-        contractBalance += _amount;
-
-        UserAccount memory useracct;
-        useracct.amount = _amount;
-        useracct.duration = block.timestamp + _duration;
-
-        users[msg.sender].push(useracct);
-
-        emit DepositSuccessful(msg.sender, _amount, block.timestamp);
+        emit Swap(msg.sender, usdcAmount, nairaAmount, true);
     }
 
-    function withdrawFunds(uint8 _index) external reentrancyGuard {
+    function swapNairaToUSDC(uint256 nairaAmount) external reentrancyGuard {
         require(msg.sender != address(0), "Zero address not allowed");
-        require(_index < users[msg.sender].length, "Out of bound");
+        require(nairaAmount > 0, "Amount must be greater than 0");
+        require(
+            nairaAmount % RATE == 0,
+            "Naira amount must be divisible by the rate"
+        );
 
-        UserAccount storage useracct = users[msg.sender][_index];
+        uint256 usdcAmount = nairaAmount / RATE;
 
-        require(useracct.duration < block.timestamp, "Not yet due");
+        require(
+            nairaToken.transferFrom(msg.sender, address(this), nairaAmount),
+            "Naira transfer failed"
+        );
+        require(
+            usdcToken.transfer(msg.sender, usdcAmount),
+            "USDC transfer failed"
+        );
 
-        uint256 userBal = useracct.amount;
-        useracct.amount = 0;
-        useracct.duration = 0;
-
-        contractBalance -= userBal;
-
-        IERC20(celotoken).transfer(msg.sender, userBal);
-
-        emit WithdrawalSuccessful(msg.sender, userBal, block.timestamp);
+        emit Swap(msg.sender, usdcAmount, nairaAmount, false);
     }
 
     function getContractBalance() external view onlyOwner returns (uint256) {

@@ -4,30 +4,39 @@ pragma solidity ^0.8.27;
 import {IERC20} from "./ITokenSwap.sol";
 
 contract TokenSwap {
-    IERC20 public usdcToken;
     IERC20 public nairaToken;
+    IERC20 public usdtToken;
     address owner;
-    address newOwner;
-    uint256 public constant RATE = 1565;
-
-    uint256 internal contractBalance;
-
     bool internal locked;
+    uint256 internal constant RATE = 1600;
 
-    event Swap(
-        address indexed user,
-        uint256 usdcAmount,
-        uint256 nairaAmount,
-        bool usdcToNaira
-    );
-
-    constructor(address _usdcToken, address _nairaToken) {
-        usdcToken = IERC20(_usdcToken);
-        nairaToken = IERC20(_nairaToken);
+    enum Currency {
+        NONE,
+        NAIRA,
+        USDT
     }
 
+    mapping(Currency => uint256) contractBalances;
+
+    constructor(IERC20 _nairaTokenCAddr, IERC20 _usdtTokenCAddr) {
+        nairaToken = _nairaTokenCAddr;
+        usdtToken = _usdtTokenCAddr;
+        owner = msg.sender;
+    }
+
+    event SwapSuccessful(
+        address indexed from,
+        address indexed to,
+        uint256 amount
+    );
+    event WithdrawSuccessful(
+        address indexed owner,
+        Currency indexed _currencyName,
+        uint256 amount
+    );
+
     modifier reentrancyGuard() {
-        require(!locked, "Not allowed to re-enter");
+        require(!locked, "Reentrancy not allowed");
         locked = true;
         _;
         locked = false;
@@ -38,60 +47,104 @@ contract TokenSwap {
         _;
     }
 
-    function swapUSDCToNaira(uint256 usdcAmount) external reentrancyGuard {
-        require(msg.sender != address(0), "Zero address not allowed");
-        require(usdcAmount > 0, "Amount must be greater than 0");
-        uint256 nairaAmount = usdcAmount * RATE;
+    function swapNairaToUsdt(address _from, uint256 _amount)
+        external
+        reentrancyGuard
+    {
+        require(msg.sender != address(0), "Zero not allowed");
+        require(_amount > 0, "Cannot swap zero amount");
 
-        require(
-            usdcToken.transferFrom(msg.sender, address(this), usdcAmount),
-            "USDC transfer failed"
-        );
-        require(
-            nairaToken.transfer(msg.sender, nairaAmount),
-            "Naira transfer failed"
+        uint256 standardAmount = _amount * 10**18;
+
+        uint256 userBal = nairaToken.balanceOf(msg.sender);
+
+        require(userBal >= _amount, "Your balance is not enough");
+
+        uint256 allowance = nairaToken.allowance(msg.sender, address(this));
+        require(allowance >= _amount, "Token allowance too low");
+
+        bool deducted = nairaToken.transferFrom(
+            _from,
+            address(this),
+            standardAmount
         );
 
-        emit Swap(msg.sender, usdcAmount, nairaAmount, true);
+        require(deducted, "Excution failed");
+
+        contractBalances[Currency.NAIRA] += standardAmount;
+
+        uint256 convertedValue_ = Naira_Usdt_Rate(
+            standardAmount,
+            Currency.NAIRA
+        );
+
+        bool swapped = usdtToken.transfer(msg.sender, convertedValue_);
+
+        if (swapped) {
+            contractBalances[Currency.USDT] += convertedValue_;
+
+            emit SwapSuccessful(_from, address(this), standardAmount);
+        }
     }
 
-    function swapNairaToUSDC(uint256 nairaAmount) external reentrancyGuard {
-        require(msg.sender != address(0), "Zero address not allowed");
-        require(nairaAmount > 0, "Amount must be greater than 0");
-        require(
-            nairaAmount % RATE == 0,
-            "Naira amount must be divisible by the rate"
-        );
+    function swapUsdtToNaira(address _from, uint256 _amount)
+        external
+        reentrancyGuard
+    {
+        require(msg.sender != address(0), "Zero not allowed");
+        require(_amount > 0, "Cannot swap zero amount");
 
-        uint256 usdcAmount = nairaAmount / RATE;
+        uint256 standardAmount = _amount * 10**6;
 
-        require(
-            nairaToken.transferFrom(msg.sender, address(this), nairaAmount),
-            "Naira transfer failed"
-        );
-        require(
-            usdcToken.transfer(msg.sender, usdcAmount),
-            "USDC transfer failed"
-        );
+        uint256 userBal = usdtToken.balanceOf(msg.sender);
+        require(userBal >= standardAmount, "Your balance is not enough");
 
-        emit Swap(msg.sender, usdcAmount, nairaAmount, false);
+        uint256 allowance = usdtToken.allowance(msg.sender, address(this));
+        require(allowance >= standardAmount, "Token allowance too low");
+
+        bool deducted = usdtToken.transferFrom(
+            _from,
+            address(this),
+            standardAmount
+        );
+        require(deducted, "Execution failed");
+
+        contractBalances[Currency.USDT] += standardAmount;
+
+        uint256 convertedValue_ = Naira_Usdt_Rate(
+            standardAmount,
+            Currency.USDT
+        );
+        bool swapped = nairaToken.transfer(msg.sender, convertedValue_);
+
+        if (swapped) {
+            contractBalances[Currency.NAIRA] += convertedValue_;
+            emit SwapSuccessful(_from, address(this), standardAmount);
+        }
     }
 
-    function getContractBalance() external view onlyOwner returns (uint256) {
-        return contractBalance;
+    function Naira_Usdt_Rate(uint256 _amount, Currency _currency)
+        internal
+        pure
+        returns (uint256 convertedValue_)
+    {
+        if (_currency == Currency.USDT) {
+            convertedValue_ = _amount * RATE;
+        } else if (_currency == Currency.NAIRA) {
+            convertedValue_ = _amount / RATE;
+        } else {
+            revert("Unsupported currency");
+        }
+        return convertedValue_;
     }
 
-    function transferOwnership(address _newOwner) external onlyOwner {
-        require(msg.sender != address(0), "Zero address not allowed");
-        require(_newOwner != address(0), "Zero address not allowed");
-        newOwner = _newOwner;
-    }
-
-    function claimOwnership() external {
-        require(msg.sender != address(0), "Zero address not allowed");
-        require(msg.sender == newOwner, "Not your turn yet");
-        owner = newOwner;
-
-        newOwner = address(0);
+    function getContractBalance()
+        external
+        view
+        onlyOwner
+        returns (uint256 contractUsdtbal_, uint256 contractNairabal_)
+    {
+        contractUsdtbal_ = usdtToken.balanceOf(address(this));
+        contractNairabal_ = nairaToken.balanceOf(address(this));
     }
 }
